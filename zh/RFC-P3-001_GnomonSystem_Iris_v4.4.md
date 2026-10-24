@@ -1,0 +1,1752 @@
+# RFC-P3-001 — **日冕系统**（天玑）协议 v4.4
+
+**GnomonSystem 协议基线 v4.4** 
+
+## 摘要
+
+本文件定义Gnomon System的P3层——天玑协议（Iris Protocol）。
+
+天玑协议解决一个核心问题：**主体是什么，从哪里来，如何被可信地证明？**
+
+天玑的理论基础：主体不是先验存在的，而是从可验证的事件历史中涌现的。
+协议设计遵循这一原则——ClaimAnchor不是“创造”主体，而是“锚定”主体与其可验证行动历史的关联。
+
+核心设计：
+
+* **EntityFingerprint**：主体的密码学身份标识，从真实身份材料单向派生，不可逆，支持多类主体（自然人·法人·AI Agent·设备）
+* **ClaimAnchor**：主体属性声明的密码学锚点，建立在EEA时序基础上，双重签名（主体知情·机构背书）
+* **AttributeType体系**：分层属性类型编码，从基础KYC到AI能力声明的完整覆盖
+* **背书信任链**：L1→L2→L3的树形信任结构，领域权威机构在各自范围内背书
+* **WPO（观察窗口）**：最小化披露机制，验证方只见到所需属性子集
+* **派生指纹（DerivedFingerprint）**：跨场景关联防护，同一主体在不同场景使用不同标识
+
+---
+
+## 目录
+
+术语与符号
+
+主体的形式化定义
+
+### 2.1 Agency与Subject
+
+### 2.2 A类主体（先验）与B类主体（派生）
+
+### 2.3 主体不是被创造的
+
+EntityFingerprint 规范
+
+### 3.1 计算方式（按主体类型）
+
+### 3.2 自然人（居民身份证）
+
+### 3.3 自然人（港澳台及外籍）
+
+### 3.4 法人（统一社会信用代码）
+
+### 3.5 AI Agent
+
+### 3.6 设备
+
+### 3.7 规范化要求（MUST）
+
+ClaimAnchor 数据结构
+
+### 4.1 字段定义（504B）
+
+### 4.2 SubjectSignature（189B签名原文）
+
+### 4.3 IrisSignature（253B签名原文）
+
+### 4.4 嵌套签名的语义
+
+### 4.5 字段计算顺序
+
+AttributeType 体系
+
+### 5.1 编码规范
+
+### 5.2 KYC类（个人身份）
+
+### 5.3 KYB类（法人身份）
+
+### 5.4 资质类（执照·执业）
+
+### 5.5 组织内类（职务·权限）
+
+### 5.6 AI Agent类
+
+### 5.7 隐私增强类（是/否型）
+
+### 5.8 自定义类
+
+背书机构信任链
+
+### 6.1 IssuerCertificate
+
+### 6.2 信任链层级（L1→L2→L3）
+
+### 6.3 allowed_attribute_types 约束
+
+### 6.4 信任链验证算法（伪代码）
+
+ClaimAnchor 生命周期
+
+### 7.1 状态机
+
+**V4.1 安全修订：签发前置条件**
+
+签发 ClaimAnchor 前必须满足以下前置条件，违反任一项→拒绝签发：
+
+1. **唯一性约束（P3-F-15）：** 同一 EntityFP 对同一 AttributeType 已有 Active 状态的 ClaimAnchor 时，不允许再次签发 Active 状态。如果旧 Claim 已处于 Revoked/Expired/Deregistered/Terminated 状态，则允许重新签发（视为重新 Potential→Active）。
+2. **前置状态检查（P3-F-32）：** 签发时必须检查当前 ClaimAnchor 的状态。若为 Grace/Expired/Revoked/Deregistered/Terminated——不允许直接签发。必须先走重新 Potential→Active 流程。
+3. **Issuer 授权验证（P3-SEC-02）：** 签发方必须在可信 Issuer ACL 中，且其 OpCert.allowed_ops 包含该 ClaimAnchor 的 AttributeType。
+
+**历史锚点不受影响：** 修订前已签发的 ClaimAnchor 继续有效。ACL 变更不回溯影响已有的 ClaimAnchor（P-004：信任链不可逆）。
+
+### 7.2 版本链（PreviousClaimAnchor）
+
+### 7.3 撤销规范
+
+### 7.4 级联撤销（AI Agent场景）
+
+隐私保护机制
+
+### 8.1 哈希语义隔离
+
+### 8.2 WPO（Windowed Proof Observation）
+
+### 8.3 派生指纹（DerivedFingerprint）
+
+### 8.4 ZKP接口预留
+
+验证规范
+
+### 9.1 ClaimAnchor完整验证算法（伪代码）
+
+### 9.2 时序切割验证
+
+### 9.3 验证输出格式
+
+协议消息（Protobuf）
+
+安全考量
+
+测试向量
+
+错误码与警告码
+
+版本历史
+
+---
+
+## 1. 术语与符号
+
+H(·) SM3哈希函数
+Sign(sk, m) SM2签名
+Verify(pk, m, σ) SM2验证
+∥ 字节串拼接
+
+EntityFingerprint 主体的密码学身份标识，32B，SM3(身份材料)
+ClaimAnchor 主体属性声明的密码学锚点，504B
+AttributeType 属性类型编码，uint16
+AttributeHash 属性内容的SM3哈希，32B，不存原文
+ValidUntil ClaimAnchor有效期，uint64 TI值，0=永不过期
+
+IssuerFingerprint 背书机构指纹，SM3(机构SM2公钥)，32B
+IrisSignature 背书机构对ClaimAnchor的签名，64B
+SubjectSignature 主体对自身声明的签名，64B
+
+WPO Windowed Proof Observation，观察窗口
+DerivedFP DerivedFingerprint，派生指纹，跨场景关联防护
+
+A类主体 先验主体：人·组织·设备，先于协议而存在
+B类主体 派生主体：AI Agent·临时代理，因特定条件而生
+
+domain_tag（天玑）：b"Iris.Claim.v1"（13字节）
+
+---
+
+## 2. 主体的形式化定义
+
+### 2.1 Agency 与 Subject
+
+**Agency（能动性）：** 能够导致可验证事件发生的最小因果单元。
+
+$$\\text{Agency}(a) \\iff \\exists E \\in \\mathcal{E},\\ \\text{Cause}(a, E)$$
+
+**Subject（主体）：** Agency在特定观察窗口中的稳定表达，由四元组定义：
+
+$$\\text{Subject}(a, W) = (f_a,\\ \\mathcal{C}\_a,\\ \\mathcal{R}\_a,\\ \\mathcal{P}\_a)$$
+
+* $f_a$：EntityFingerprint，主体的密码学标识
+* $\\mathcal{C}\_a$：能力集合（由ClaimAnchor证明）
+* $\\mathcal{R}\_a$：责任集合（由事件历史推导）
+* $\\mathcal{P}\_a$：可验证属性集合
+* $W = \[t_s, t_e\]$：观察时间窗口（TI范围）
+
+**主体是事件的结构语义：**
+事件 E 包含 SemanticAnchor
+SemanticAnchor.P3_ref → ClaimAnchor.AnchorID → EntityFingerprint
+
+这条引用链使得：
+"事件发生" 和 "谁发起了事件" 密码学绑定
+主体不是外部附加的标签，而是从事件因果关系中涌现的
+
+### 2.2 A类主体与B类主体
+
+**A类主体（先验主体）：**
+定义：先于协议而存在的主体
+类型：自然人·法人·政府机构·设备
+特点：
+· 注册事件 = 锚定（将已存在的主体与可验证历史关联）
+· 协议不创造A类主体，只记录其行动
+· EntityFingerprint从现实世界身份材料派生
+· Potential状态为逻辑状态，不对应链上存储的ClaimAnchor
+表示该主体在现实世界存在但尚未在协议中锚定
+状态：Potential（逻辑） → Active → Grace → Expired/Revoked/Deregistered
+
+**B类主体（派生主体）：**
+定义：因特定触发条件而生的主体
+类型：AI Agent·临时代理·虚拟实体
+特点：
+· 生成事件 = 创造（触发条件是存在的前提）
+· 生命周期完全在协议框架内
+· EntityFingerprint包含部署方指纹（不可分离）
+· B类主体没有Potential状态，直接从触发事件生成
+状态：Active → Grace → Expired/Revoked/Terminated
+
+关键区别：
+A类：Potential状态仅A类专有（逻辑状态）
+B类：无Potential，被创建即Active
+
+### 2.3 主体不是被创造的
+
+正确理解：
+ClaimAnchor.SubjectSignature 证明：主体知情并同意此声明
+ClaimAnchor.IrisSignature 证明：背书机构核实并背书此声明
+
+这两个签名不是“创造”主体，而是“承认”主体的存在
+并将其属性密码学锚定到可验证的事件时序上
+
+错误理解（应避免）：
+❌ "L2节点创建了用户账号"
+❌ "注册ClaimAnchor就是注册主体"
+✅ "ClaimAnchor记录了主体在TI时刻声明了某属性，并获得背书"
+
+---
+
+## 3. EntityFingerprint 规范
+
+EntityFingerprint 是主体的密码学身份标识，从真实身份材料单向哈希派生。
+
+**核心原则：**
+
+* 单向性：从 EntityFingerprint 无法反推身份材料
+* 确定性：相同规范化输入 → 相同 EntityFingerprint
+* 隔离性：L2节点只存 EntityFingerprint，不存身份材料原文
+* 稳定性：同一主体的 EntityFingerprint 跨时间保持不变
+
+### 3.1 计算方式总览
+
+EntityFingerprint = H(规范化身份材料字节序列)
+
+type_prefix 编码：
+
+**V4.1 安全修订：EntityPrefix 白名单**
+EntityFingerprint 的 type_prefix 仅接受以下值。任何不在白名单中的 prefix 必须拒绝——不得签发 ClaimAnchor。
+
+| prefix | 类型 | 说明 |
+|:---:|----|----|
+| 0x01 | 自然人 | 身份证号·护照号 |
+| 0x02 | 法人 | 统一社会信用代码 |
+| 0x03 | 设备 | 设备指纹 |
+| 0x05 | 组织 | 非营利·政府·国际组织 |
+| 0x20 | AI Agent | deployer_fp 嵌入·O(1)追责 |
+
+未来新增类型 SHALL 更新此白名单。
+
+0x01 居民身份证（中国大陆）
+0x02 港澳台居民来往内地通行证 / 外籍护照
+0x03 统一社会信用代码（法人）
+0x04 组织机构代码（旧制，向后兼容）
+0x20 AI Agent
+0x30 IoT设备
+0xFF 自定义（私有场景）
+
+### 3.2 自然人（居民身份证）
+
+EntityFingerprint = H(
+name_normalized ∥ // 姓名，UTF-8 NFC规范化，不含空格
+0x01 ∥ // type_prefix
+id_number_upper // 身份证号，18位大写（含校验码X）
+)
+
+规范化规则（MUST）：
+name_normalized：
+Unicode NFC规范化（composed form）
+去除所有前导和尾随空白（trim）
+不转换大小写（姓名保留原始大小写）
+编码：UTF-8字节序列
+
+id_number_upper：
+ASCII字节序列
+字母统一转大写（身份证校验码X → X，不接受x）
+去除所有空格和连字符
+长度MUST等于18字节
+
+示例（演示用，非真实数据）：
+姓名：张三
+身份证：110101199001011234
+
+name_bytes = "张三".encode('utf-8') # b'\\xe5\\xbc\\xa0\\xe4\\xb8\\x89'
+type_prefix = bytes(\[0x01\])
+id_bytes = b"110101199001011234"
+
+EntityFingerprint = H(name_bytes ∥ type_prefix ∥ id_bytes)
+
+### 3.3 自然人（港澳台及外籍）
+
+EntityFingerprint = H(
+name_normalized ∥
+0x02 ∥
+cert_type(1B) ∥ // 证件类型编码（见下表）
+cert_number_upper // 证件号，大写ASCII
+)
+
+cert_type编码：
+0x01 香港居民来往内地通行证（回乡证）
+0x02 澳门居民来往内地通行证
+0x03 台湾居民来往大陆通行证
+0x10 护照（通用，含中国护照）
+0x11 美国护照
+0x12 欧盟成员国护照
+0x20 外国人永久居留身份证
+
+规范化规则同3.2，cert_number_upper统一大写。
+
+### 3.4 法人（统一社会信用代码）
+
+EntityFingerprint = H(
+0x03 ∥ // type_prefix
+uscc_upper // 统一社会信用代码，18位大写ASCII
+)
+
+注意：法人EntityFingerprint不包含名称
+原因：企业名称可以变更，USCC不变
+企业名称作为 AttributeHash 存储在 ClaimAnchor 中（可更新）
+
+规范化规则：
+uscc_upper：
+18位统一社会信用代码
+字母统一转大写
+去除所有空格
+长度MUST等于18字节
+
+### 3.5 AI Agent
+
+EntityFingerprint = H(
+0x20 ∥ // type_prefix（B类主体标识）
+agent_public_key ∥ // 64B SM2公钥（原始坐标拼接：x∥y，各32B，非压缩格式）
+deployer_fingerprint // 32B 部署方EntityFingerprint
+)
+
+注：SM2公钥采用非压缩格式（x坐标32B + y坐标32B），符合国密标准。
+
+关键设计：部署方指纹永久嵌入
+deployer_fingerprint 是部署方（自然人或法人）的 EntityFingerprint
+嵌入后：验证方持有 Agent EntityFingerprint 即可确认部署方
+不需要查询任何外部数据
+EntityFingerprint 本身携带追责信息
+
+AI Agent的生成规则（GenerateSubjectCondition）：
+部署方必须预注册 GenerateSubjectCondition（详见字段设计 FLD-001）
+条件满足时触发生成
+生成的ClaimAnchor中 EntityFingerprint 按上述公式计算
+IssuerFingerprint 通常为 AI治理机构 或 部署方自身
+
+多级AI Agent（Agent生成Agent）：
+若Agent_A生成Agent_B：
+Agent_B.deployer_fingerprint = Agent_A.EntityFingerprint
+= H(0x20 ∥ AgentA_pubkey ∥ HumanDeployer_fp)
+追责链：Agent_B → Agent_A → 自然人
+深度MUST由DelegationDepth（P5层）控制，防止无限递归
+
+### 3.6 设备
+
+EntityFingerprint = H(
+0x30 ∥ // type_prefix
+device_public_key ∥ // 64B SM2公钥（非压缩格式）
+manufacturer_fingerprint // 32B 制造商EntityFingerprint
+)
+
+制造商指纹的作用：类似AI Agent的部署方指纹
+追责链：设备操作 → 设备EntityFP → 制造商EntityFP → 制造商法人
+
+### 3.7 规范化要求（MUST）
+
+所有 EntityFingerprint 计算均MUST遵守以下规范化规则：
+
+```python
+def normalize_name(name: str) -> bytes:
+    """姓名规范化"""
+    import unicodedata
+    # Step 1: Unicode NFC规范化
+    normalized = unicodedata.normalize('NFC', name)
+    # Step 2: 去除前导和尾随空白
+    normalized = normalized.strip()
+    # Step 3: 编码为UTF-8
+    return normalized.encode('utf-8')
+
+def normalize_id_number(id_num: str) -> bytes:
+    """证件号规范化"""
+    # Step 1: 去除所有空格和连字符
+    cleaned = id_num.replace(' ', '').replace('-', '')
+    # Step 2: 统一转大写
+    upper = cleaned.upper()
+    # Step 3: 编码为ASCII字节
+    return upper.encode('ascii')
+
+def normalize_uscc(uscc: str) -> bytes:
+    """统一社会信用代码规范化"""
+    cleaned = uscc.replace(' ', '').upper()
+    assert len(cleaned) == 18, f"USCC长度错误：{len(cleaned)}"
+    return cleaned.encode('ascii')
+
+# 规范化失败时的处理：
+# 输入不符合规范 → 返回 E_NORMALIZATION_FAILED，不生成EntityFingerprint
+# 背书机构MUST在签发前验证规范化结果
+```
+
+## 4. ClaimAnchor 数据结构
+
+### 4.1 字段定义（504B）
+
+ClaimAnchor 由 EEA（224B含VP）+ ExtHeader（8B）+ payload（272B）组成。
+
+结构：
+EEA核心字段（192B）
+VerificationProof（32B，可选，若L2节点支持VP则包含）
+ExtensionHeader（8B）：extension_type=0x0102，hdr_flags.bit0=1(critical)
+payload（272B）：见下表
+
+payload 字段布局（272B）：
+
+偏移    长度    字段名                  类型          描述
+────────────────────────────────────────────────────────────────
+0       32B     EntityFingerprint       bytes\[32\]
+计算：见§3，按主体类型不同
+含义：主体的密码学身份标识
+
+32      32B     AttributeHash           bytes\[32\]
+计算：H(attribute_content_canonical_bytes)
+含义：属性内容的密码学承诺，不存原文
+canonical_bytes：由AttributeType规范定义的确定性序列化
+
+64      32B     IssuerFingerprint       bytes\[32\]
+计算：H(issuer_SM2_public_key_bytes)
+含义：背书机构的密码学标识
+
+96      32B     PreviousClaimAnchor     bytes\[32\]
+含义：同一 EntityFingerprint + AttributeType 的前版本 AnchorID
+全零（0³²）= 首次签发，无前版本
+版本链作用：历史属性变更不可删除，可追溯
+
+128     8B      ValidUntil              uint64 BE
+含义：current_TI ≤ ValidUntil 时有效
+0 = 永不过期（谨慎使用，建议只用于根证书类）
+
+136     2B      AttributeType           uint16 BE
+含义：本ClaimAnchor证明的属性类别
+编码：见§5
+
+138     6B      reserved_future         bytes\[6\]
+含义：8B对齐扩展槽。当前 MUST=0。
+为 AttributeType/ValidUntil v2 扩展预留。
+
+144     64B     SubjectSignature        bytes\[64\]
+计算：Sign(sk_subject, H(subject_signing_payload))
+签名原文：见§4.2（189B）
+
+208     64B     IrisSignature           bytes\[64\]
+计算：Sign(sk_issuer, H(iris_signing_payload))
+签名原文：见§4.3（253B）
+────────────────────────────────────────────────────────────────
+payload合计：272B
+ClaimAnchor总计：224 + 8 + 272 = 504B
+
+### 4.2 SubjectSignature 签名原文（189B）
+
+subject_signing_payload = (
+b"Iris.Claim.v1"              # 13B  domain_tag（防跨协议复用）
++ EEA.AnchorID                # 32B  绑定至具体EEA（防移植攻击）
++ EntityFingerprint           # 32B
++ AttributeHash               # 32B
++ IssuerFingerprint           # 32B
++ PreviousClaimAnchor         # 32B
++ BE64(ValidUntil)            # 8B
++ BE16(AttributeType)         # 2B
++ reserved_future             # 6B  全零，R3切片原样
+)
+total = 13+32+32+32+32+32+8+2+6 = 189B
+
+SubjectSignature = Sign(sk_subject, H(subject_signing_payload))
+语义： 主体以私钥签名，证明：
+
+本人知晓并同意此属性声明
+
+此声明绑定至特定EEA（时序锚定）
+
+此声明关联至特定背书机构
+
+### 4.3 IrisSignature 签名原文（253B）
+
+iris_signing_payload = (
+subject_signing_payload       # 189B  SubjectSignature的完整原文
++ SubjectSignature            # 64B   主体签名本身
+)
+total = 189 + 64 = 253B
+
+IrisSignature = Sign(sk_issuer, H(iris_signing_payload))
+语义： 背书机构以私钥签名，证明：
+
+机构已核实属性内容（AttributeHash对应的原文）
+
+机构确认主体已知情同意（覆盖SubjectSignature）
+
+机构对整个声明的真实性背书
+
+嵌套的安全意义： IrisSignature覆盖SubjectSignature，防止攻击者伪造"主体已同意"再请求机构背书。机构签名时已见到主体签名，确认主体同意是真实的。
+
+### 4.4 嵌套签名的语义
+
+签名链：
+
+主体私钥签名 → SubjectSignature
+↓
+机构私钥签名（覆盖SubjectSignature）→ IrisSignature
+
+验证顺序：
+Step 1  验证SubjectSignature（主体知情同意）
+Step 2  验证IrisSignature（机构背书，覆盖主体签名）
+
+攻击防御：
+攻击A：攻击者伪造主体同意，请求机构背书
+→ 机构看到的SubjectSignature是伪造的
+→ 机构验证SubjectSignature失败 → 拒绝背书
+
+攻击B：攻击者替换SubjectSignature
+→ IrisSignature覆盖SubjectSignature
+→ 替换后IrisSignature验证失败
+
+攻击C：将ClaimAnchor的背书移植到其他EEA
+→ SubjectSignature含EEA.AnchorID（189B原文中第14-45字节）
+→ 不同EEA对应不同AnchorID → 移植后SubjectSignature验证失败
+
+### 4.5 字段计算顺序
+
+Step 1  完成EEA的生成和存储（获取EEA.AnchorID）
+Step 2  计算 EntityFingerprint（按主体类型，见§3）
+Step 3  计算 AttributeHash = H(attribute_content_canonical_bytes)
+Step 4  确定 ValidUntil（背书机构策略决定，MUST ≤ IssuerCertificate.valid_until）
+Step 5  获取 IssuerFingerprint = H(issuer_public_key)
+Step 6  查询 PreviousClaimAnchor（同一EntityFP+AttributeType的最新版本AnchorID）
+Step 7  构造 subject_signing_payload（189B），计算 SubjectSignature
+Step 8  构造 iris_signing_payload（253B），计算 IrisSignature
+Step 9  组装 ExtensionHeader（extension_type=0x0102，hdr_flags.bit0=1(critical)）
+Step 10 写入L2节点存储，更新 entity_current_claims 索引
+
+## 5. AttributeType 体系
+
+AttributeType 是16位无符号整数，定义主体属性的类别。
+
+### 5.1 编码规范
+
+编码空间分配：
+0x0000          保留，不使用
+0x0001-0x00FF   KYC类（个人身份）
+0x0100-0x01FF   资质类（执照·执业·认证）
+0x0200-0x02FF   组织内类（职务·权限·任期）
+0x0300-0x03FF   AI Agent类（能力·授权范围）
+0x0400-0x04FF   设备类
+0x0050-0x008F   隐私增强类（是/否型，无需ZKP）
+0xFF00-0xFFFF   自定义（私有，不跨机构使用）
+
+编码原则：
+同一 EntityFingerprint 在同一时刻，
+每个 AttributeType 最多有一个有效的 ClaimAnchor
+（唯一性约束，L2节点碰撞检测执行）
+
+### 5.2 KYC类（个人身份）
+
+AttributeType   名称              说明
+──────────────────────────────────────────────────────────
+0x0001          KYC_L1_BASIC      基础身份（姓名+证件号核验）
+AttributeHash = H({"name":..., "cert_type":..., "cert_no_hash":...,
+"pubkey_hash":...})  // 可选包含主体公钥哈希
+最低KYC级别，适用于一般场景
+
+0x0002          KYC_L2_STANDARD   标准身份（L1 + 人脸比对 + 活体检测）
+AttributeHash = H({"kyc_l1_ref":..., "face_match_score":...,
+"liveness_passed":true, "verified_at":...})
+
+0x0003          KYC_L3_ENHANCED   增强身份（L2 + 银行卡四要素 + 反洗钱）
+适用于高净值·跨境·合规敏感场景
+
+0x0010          ID_CHANGE         身份变更记录（姓名变更·证件换发）
+AttributeHash包含新旧证件引用
+
+0x0020          ADDRESS_PROOF     居住地证明
+0x0021          CONTACT_VERIFIED  联系方式核验（手机号·邮箱）
+
+### 5.3 KYB类（法人身份）
+
+AttributeType   名称              说明
+──────────────────────────────────────────────────────────
+0x0011          KYB_B1_BASIC      法人基础（USCC + 工商登记信息）
+AttributeHash = H({"uscc":..., "company_name_hash":...,
+"registered_capital":..., "reg_date":...})
+
+0x0012          KYB_B2_STANDARD   法人标准（B1 + 法定代表人身份 + 经营范围）
+AttributeHash包含法定代表人ClaimAnchor引用
+
+0x0013          KYB_B3_ENHANCED   法人增强（B2 + 财务数据 + 信用评级）
+
+0x0015          LEGAL_REP_CURRENT 当前法定代表人（频繁变更，独立类型）
+AttributeHash = H({"legal_rep_fp":..., "effective_from":...})
+
+0x0016          LEGAL_REP_HISTORY 历史法定代表人变更记录
+
+0x0020          BRANCH_RELATION   分支机构关系（总部↔分支）
+AttributeHash包含总部EntityFingerprint引用
+
+0x0021          EQUITY_STRUCTURE  股权结构（前十大股东快照）
+
+### 5.4 资质类（执照·执业）
+
+AttributeType   名称              说明
+──────────────────────────────────────────────────────────
+0x0101          FIN_LICENSE       金融从业资质（基金·期货·保险等）
+0x0102          LAW_LICENSE       律师执照（含执业机构·专业方向）
+0x0103          MED_LICENSE       医疗执照（医师·药师·护士）
+0x0104          AUDIT_LICENSE     注册会计师执照
+0x0105          SEC_LICENSE       证券从业资质
+0x0110          DOMAIN_EXPERT     领域专家认证（由行业机构签发）
+0x0120          GOVT_CLEARANCE    政府安全许可（由政务机构签发）
+
+### 5.5 组织内类（职务·权限）
+
+AttributeType   名称              说明
+──────────────────────────────────────────────────────────
+0x0201          ORG_ROLE          组织内职务
+AttributeHash = H({"org_fp":..., "role":...,
+"dept_hash":..., "tenure_from":...})
+
+0x0202          ORG_SCOPE         组织内授权范围（签署·采购·代理权限）
+0x0203          ORG_LEVEL         职级等级（用于权限分级控制）
+0x0210          BOARD_MEMBER      董事会成员（含独立董事标记）
+0x0211          LEGAL_REP_CHANGE  法代变更记录（由机构签发，触发0x0015更新）
+0x0220          PROXY_AUTH        授权代理证明（含委托方引用）
+
+### 5.6 AI Agent类
+
+AttributeType   名称              说明
+──────────────────────────────────────────────────────────
+0x0301          AGENT_CAPABILITY  AI Agent能力声明
+AttributeHash = H({
+"model_id":...,           // 模型标识
+"capability_types":\[...\], // 能力类型列表
+"max_context_tokens":..., // 最大上下文（仅供参考，验证方信任背书机构）
+"evaluation_passed":...   // 评测通过标记
+})
+注：能力声明中的数值字段由AI治理机构背书，
+验证方仅信任背书机构的签名，不验证数值的真实性。
+
+0x0302          AGENT_SCOPE       AI Agent允许的操作范围
+AttributeHash = H({
+"allowed_domains":\[...\],  // 允许的业务域
+"forbidden_actions":\[...\],// 明确禁止的操作
+"max_value_per_op":...    // 单次操作价值上限
+})
+
+0x0303          AGENT_LINEAGE     AI Agent血缘（部署链）
+AttributeHash = H({
+"parent_agent_fp":...,    // 父Agent指纹（若有）
+"deploy_chain_depth":..., // 部署链深度
+"root_deployer_fp":...    // 根部署方指纹
+})
+
+0x0310          AGENT_AUDIT       AI Agent审计结果（由安全评测机构签发）
+0x0311          AGENT_COMPLIANCE  AI Agent合规证明（含法规版本）
+
+### 5.7 隐私增强类（是/否型）
+
+隐私增强类 AttributeType 只存储是/否结论，不存储原始数值。
+实现细粒度隐私保护，无需ZKP即可支持大多数场景。
+
+AttributeType   名称              说明
+──────────────────────────────────────────────────────────
+0x0050          AGE_GE_18         年龄 ≥ 18 岁（是/否）
+0x0051          AGE_GE_21         年龄 ≥ 21 岁
+0x0052          AGE_GE_60         年龄 ≥ 60 岁（老年认证）
+0x0053          AGE_LT_18         年龄 < 18 岁（未成年保护）
+
+0x0060          CREDIT_QUALIFIED  信用评级达标（是/否，不含具体分数）
+0x0061          AML_CLEARED       反洗钱核查通过
+0x0062          SANCTION_FREE     无制裁名单记录
+
+0x0070          MAINLAND_RESIDENT 中国大陆居民（是/否）
+0x0071          SPECIFIC_JURISDICTION 特定司法管辖区居民
+
+0x0080          QUALIFIED_INVESTOR    合格投资者（是/否）
+0x0081          PROFESSIONAL_INVESTOR 专业投资者
+
+0x0090          HAS_MEDICAL_LICENSE   持有有效医疗执照（是/否）
+0x0091          HAS_LAW_LICENSE       持有有效律师执照
+
+AttributeHash计算（是/否型）：
+AttributeHash = H(BE16(AttributeType) ∥ 0x01 ∥ BE64(verified_at_ti) ∥ issuer_salt)
+0x01 = True（结论为是）
+0x00 = False（一般不签发False，直接不签发即可）
+issuer_salt = 背书机构随机盐（32B），防止多机构间关联
+salt由背书机构生成并持久化，验证时背书机构可披露salt以证明哈希匹配
+
+### 5.8 自定义类（0xFF00-0xFFFF）
+
+自定义类用于企业内部场景，不跨机构使用。
+
+规则：
+· 只在签发机构内部有意义
+· L2节点存储但不解释语义
+· 其他机构验证方遇到自定义类 → MAY 忽略（如同未知ExtensionHeader）
+· 不得申请成为标准类型（标准类需走正式申请流程）
+· AttributeHash的canonical格式由签发机构自行定义
+
+## 6. 背书机构信任链
+
+### 6.1 IssuerCertificate
+
+背书机构通过 IssuerCertificate 获得签发 ClaimAnchor 的权限。
+
+IssuerCertificate 字段：
+
+issuer_fingerprint(32B)       = H(issuer_SM2_pubkey)
+issuer_public_key(64B)        SM2公钥（原始字节）
+issuer_level(1B)              1=L1根 2=L2 3=L3
+allowed_attribute_types(N×2B) 允许签发的AttributeType列表
+max_lifetime_ti(8B)           可签发的最大ValidUntil（相对值）
+parent_issuer_fp(32B)         上级机构指纹，全零=根机构
+parent_cert_sig(64B)          上级机构对本证书的签名
+root_sig(64B)                 L1根签名（对整个证书）
+valid_from(8B)                生效TI
+valid_until(8B)               过期TI，0=永不过期
+successor_fp(32B)             密钥轮换接替机构指纹，全零=无
+overlap_end_ti(8B)            Overlap期结束TI
+
+IssuerCertificate签名原文构造：
+signing_payload =
+"Iris.IssuerCert.v1"(18B)
+∥ issuer_fingerprint(32B)
+∥ BE64(issuer_level)     // 1B扩展为8B对齐
+∥ allowed_attribute_types(序列化)  // 连续BE16
+∥ BE64(valid_from)
+∥ BE64(valid_until)
+parent_cert_sig = Sign(sk_parent, H(signing_payload))  // 父机构签名
+root_sig = Sign(sk_root_L1, H(signing_payload))       // L1根签名（对根机构直接签发）
+
+### 6.2 信任链层级
+
+L1根背书机构（Root Issuer）：
+运营方：政府机构·央行·最高法·国家授时机构
+签发权：所有AttributeType（全范围）
+issuer_level = 1
+由天枢时源科技有限公司的L1节点签发IssuerCertificate
+特殊权限：可吊销下级机构的IssuerCertificate
+
+L2背书机构（Domain Issuer）：
+运营方：银行·证券公司·认证机构·行业协会
+签发权：其IssuerCertificate中的allowed_attribute_types范围内
+issuer_level = 2
+由L1根背书机构签发IssuerCertificate
+MUST验证：申请者的业务许可·合规资质·技术能力
+
+L3背书机构（Sub Issuer）：
+运营方：企业内部·行业联盟·特定场景平台
+签发权：由L2机构授权的AttributeType子集
+issuer_level = 3
+由L2背书机构签发IssuerCertificate
+典型场景：大型企业内部签发员工职务证明（0x0201）
+
+最大委托深度：3层（L1→L2→L3）
+L3不能再签发L4的IssuerCertificate
+
+### 6.3 allowed_attribute_types 约束
+
+约束规则：
+父机构的allowed_attribute_types ⊇ 子机构的allowed_attribute_types
+子机构不能签发父机构未授权的AttributeType
+
+L2节点在存储ClaimAnchor时MUST验证：
+ClaimAnchor.AttributeType ∈ IssuerCertificate.allowed_attribute_types
+违反 → E_ATTR_NOT_ALLOWED（E_PERM_003）
+
+最小权限原则（建议）：
+背书机构申请IssuerCertificate时，
+SHOULD只申请业务实际需要的AttributeType范围
+不要申请"全范围"（除非是L1根机构）
+
+### 6.4 信任链验证算法（伪代码）
+
+python
+def cert_signing_payload(cert: IssuerCertificate) -> bytes:
+"""构造IssuerCertificate签名原文（用于验证parent_cert_sig和root_sig）"""
+allowed_attr_bytes = b"".join(BE16(attr) for attr in cert.allowed_attribute_types)
+payload = (
+b"Iris.IssuerCert.v1"(18B)
++ cert.issuer_fingerprint
++ (cert.issuer_level).to_bytes(8, 'big')  # 1B扩展为8B对齐
++ allowed_attr_bytes
++ cert.valid_from.to_bytes(8, 'big')
++ cert.valid_until.to_bytes(8, 'big')
+)
+return H(payload)
+
+def verify_issuer_chain(
+issuer_fp:       bytes,  # 32B 待验证的背书机构指纹
+attribute_type:  int,    # 要签发的AttributeType
+at_ti:           int,    # 验证时刻TI
+) -> tuple\[bool, str\]:
+"""
+验证背书机构的信任链完整性。
+返回 (is_valid, error_message)
+"""
+visited = set()  # 防止循环引用
+
+```
+def check_cert(fp: bytes, depth: int = 0) -> tuple[bool, str]:
+    if fp in visited:
+        return False, "E_ISSUER_CYCLE: 检测到信任链循环"
+    visited.add(fp)
+
+    cert = get_issuer_certificate(fp)
+    if cert is None:
+        return False, f"E_ISSUER_NOT_FOUND: 机构{fp.hex()[:8]}未注册"
+
+    # 检查有效期
+    if not (cert.valid_from <= at_ti):
+        return False, f"E_ISSUER_NOT_YET_VALID: 机构在TI={at_ti}尚未生效"
+    if cert.valid_until != 0 and cert.valid_until < at_ti:
+        return False, f"E_ISSUER_EXPIRED: 机构在TI={at_ti}已过期"
+
+    # 检查是否被撤销
+    if is_issuer_revoked(fp, at_ti):
+        return False, f"E_ISSUER_REVOKED: 机构已被撤销"
+
+    # 检查AttributeType权限
+    if attribute_type not in cert.allowed_attribute_types:
+        return False, f"E_ATTR_NOT_ALLOWED: 机构无权签发AttributeType={attribute_type:#06x}"
+
+    # 验证父机构签名
+    sig_payload = cert_signing_payload(cert)
+    if cert.parent_issuer_fp == bytes(32):
+        # 根机构：验证L1节点签名
+        ok = Verify(l1_root_pubkey, sig_payload, cert.root_sig)
+        if not ok:
+            return False, "E_ROOT_SIG_INVALID: L1根签名无效"
+        return True, ""
+    else:
+        # 非根机构：递归验证父机构
+        parent_ok, parent_err = check_cert(cert.parent_issuer_fp, depth + 1)
+        if not parent_ok:
+            return False, f"E_PARENT_INVALID: 父机构验证失败 → {parent_err}"
+
+        # 验证父机构对本证书的签名
+        parent_cert = get_issuer_certificate(cert.parent_issuer_fp)
+        ok = Verify(parent_cert.public_key, sig_payload, cert.parent_cert_sig)
+        if not ok:
+            return False, "E_PARENT_SIG_INVALID: 父机构签名无效"
+
+        # 检查权限继承：子集关系
+        if not set(cert.allowed_attribute_types).issubset(
+                set(parent_cert.allowed_attribute_types)):
+            return False, "E_ATTR_OVERFLOW: 子机构权限超出父机构范围"
+
+        return True, ""
+
+return check_cert(issuer_fp)
+```
+
+## 7. ClaimAnchor 生命周期
+
+### 7.1 状态机
+
+A类主体状态机：
+
+Potential ──register──► Active ──validity_expires──► Grace
+│                           │
+│revoke                 renew│  exceed_grace_period
+▼                           ▼         ▼
+Revoked                     Active   Expired
+│
+┌───────────────────────────┘
+│ re-endorse（重新背书）
+└──────────────────────► Active
+Deregistered（主动注销，不可逆）
+Terminated（主体终止，如去世，不可逆）
+
+注：Potential为逻辑状态，不对应链上存储的ClaimAnchor。
+表示该主体在现实世界存在但尚未在协议中锚定。
+
+B类主体状态机（无Potential）：
+
+\[触发事件\] ──生成──► Active ──validity_expires──► Grace
+│                             │
+│revoke/cascade_revoke    renew│
+▼                             ▼
+Revoked                       Active
+Terminated（条件终止，如授权撤销）
+
+吸收态（不可逆）：
+Revoked·Deregistered·Terminated·Expired（超过宽限期且未续期）
+
+宽限期（Grace Period）：
+默认30天（可在IssuerCertificate中配置）
+宽限期内ClaimAnchor仍视为有效（降级提示）
+宽限期结束未续期 → Expired（不可逆）
+
+### 7.2 版本链（PreviousClaimAnchor）
+
+同一主体（EntityFingerprint）的同一属性类型（AttributeType）
+可以有多个版本的ClaimAnchor，通过版本链连接。
+
+版本链规则：
+新版本.PreviousClaimAnchor = 旧版本.AnchorID
+首次签发：PreviousClaimAnchor = 全零（0³²）
+
+版本链的用途：
+① 历史追溯：查看某属性在历史上的所有版本
+② 不可删除：即使属性被撤销，历史版本仍然存在
+③ 变更证明：证明某属性在某时刻的值是X（而非现在的Y）
+
+版本链的有效性约束：
+PreviousClaimAnchor 非全零时：
+MUST 存在对应的ClaimAnchor记录
+MUST 对应记录的 EntityFingerprint 与当前一致
+SHOULD 对应记录的 AttributeType 与当前一致
+（跨AttributeType版本链属于特殊场景，需声明理由）
+
+L2节点存储：
+entity_current_claims 表只存当前有效的ClaimAnchor
+完整版本链在 claim_anchors 表（含所有历史版本）
+
+### 7.3 撤销规范
+
+撤销类型：
+主动撤销（主体申请）：
+revocation_reason = 0x02（主动注销）
+主体需通过背书机构代理提交RevocationRecord
+背书机构在收到主体签名或带外认证后发起撤销
+效果：ClaimAnchor.status → Revoked
+
+安全撤销（机构发起）：
+revocation_reason = 0x01（安全风险）
+由签发机构或上级机构发起
+效果：ClaimAnchor.status → Revoked
+
+法律强制撤销：
+revocation_reason = 0x03（法律强制）
+由监管机构发起，override_grace=1（立即生效）
+MUST 附带 regulation_reference（法规依据哈希）
+效果：ClaimAnchor.status → Revoked（立即，跳过宽限期）
+
+级联撤销：
+revocation_reason = 0x04（级联撤销）
+触发条件：上级主体（部署方/父机构）被撤销
+效果：所有下级ClaimAnchor同步标记为Revoked
+
+撤销传播：
+RevocationRecord 通过 SyncService 广播
+SLA：30分钟内覆盖99%的L2节点
+高安全场景：实时查询L2节点（不依赖缓存/TrustPackage）
+
+### 7.4 级联撤销（AI Agent场景）
+
+python
+MAX_CASCADE_DEPTH = 5  # 最大级联深度，与P5协议DelegationDepth最大值一致
+
+def cascade_revoke_agent(
+deployer_fp:  bytes,   # 32B 被撤销的部署方EntityFingerprint
+revoke_ti:    int,     # 撤销生效TI
+reason:       int,     # 撤销原因
+) -> list\[RevocationRecord\]:
+"""
+级联撤销：部署方被撤销时，
+撤销所有以该部署方为deployer的AI Agent的ClaimAnchor。
+"""
+revocations = [ ]
+
+```
+# 查询所有以deployer_fp为部署方的AI Agent
+# EntityFingerprint = H(0x20 ∥ agent_pubkey ∥ deployer_fp)
+# deployer_fp作为查询键（需要索引支持）
+agent_claims = query_agent_claims_by_deployer(deployer_fp)
+
+for claim in agent_claims:
+    if claim.status in (ACTIVE, GRACE, PENDING):
+        rr = RevocationRecord(
+            claim_anchor_id     = claim.anchor_id,
+            entity_fingerprint  = claim.entity_fingerprint,
+            attribute_type      = 0,  # 撤销所有类型
+            revocation_time     = revoke_ti,
+            revocation_reason   = 0x04,  # 级联撤销
+            issuer_fingerprint  = deployer_fp,  # 发起方
+            override_grace      = True,  # 立即生效
+        )
+        revocations.append(rr)
+
+# 批量广播
+broadcast_revocations_batch(revocations)
+return revocations
+```
+
+# 级联深度控制（防止无限递归）
+
+def cascade_revoke_recursive(entity_fp: bytes, depth: int = 0):
+if depth > MAX_CASCADE_DEPTH:
+audit_log.warn(f"级联撤销深度超限：{depth}")
+return
+sub_agents = query_agent_claims_by_deployer(entity_fp)
+for agent in sub_agents:
+cascade_revoke_agent(agent.entity_fingerprint, current_ti(), 0x04)
+cascade_revoke_recursive(agent.entity_fingerprint, depth + 1)
+
+## 8. 隐私保护机制
+
+### 8.1 哈希语义隔离
+
+L2节点存储策略（语义隔离原则）：
+
+存储：
+EntityFingerprint（主体密码学标识，32B）
+AttributeType（类型编码，uint16）
+AttributeHash（属性内容的SM3哈希，32B）
+IssuerFingerprint（机构密码学标识，32B）
+ValidUntil（有效期TI，uint64）
+SubjectSignature·IrisSignature（签名）
+
+不存储：
+身份证号·姓名·地址等身份材料原文
+属性内容的原始数据（只存AttributeHash）
+任何可还原主体真实身份的信息
+
+安全边界：
+即使L2节点完全被攻击者控制：
+攻击者知道：某主体具有某类型属性，某机构已背书
+攻击者不知道：属性的具体内容是什么，主体的真实姓名
+
+### 8.2 WPO（Windowed Proof Observation）
+
+WPO是ClaimAnchor集合的子集视图，验证方只能看到申请查看的属性。
+
+python
+def create_wpo(
+entity_fp:        bytes,           # 32B 主体指纹
+requested_types:  list\[int\],       # 请求的AttributeType列表
+requester_fp:     bytes,           # 32B 请求方指纹
+purpose:          str,             # 查询目的说明（明文）
+purpose_hash:     bytes,           # 32B H(purpose)
+at_ti:            int,             # 验证时刻TI
+) -> WPO:
+"""
+生成Windowed Proof Observation。
+只包含requested_types中的ClaimAnchor。
+其余属性对请求方不可见，且无法推断其存在。
+"""
+# 验证purpose与purpose_hash一致（可选，由主体决定是否执行）
+if H(purpose.encode('utf-8')) != purpose_hash:
+raise ValueError("purpose_hash不匹配")
+
+```
+wpo = WPO(
+    entity_fp    = entity_fp,
+    requester_fp = requester_fp,
+    purpose_hash = purpose_hash,
+    generated_at = at_ti,
+    claims       = [],
+)
+
+for attr_type in requested_types:
+    claim = get_current_claim(entity_fp, attr_type, at_ti)
+    if claim and is_valid(claim, at_ti):
+        wpo.claims.append(claim)
+    # 若某类型不存在或无效，不在WPO中体现
+    # 验证方看到"未包含"，无法区分"不存在"和"主体拒绝披露"
+
+# WPO签名：主体或授权方签名，防止WPO被篡改
+wpo.subject_sig = Sign(sk_subject, H(wpo_signing_payload(wpo)))
+return wpo
+```
+
+def verify_wpo(wpo: WPO, at_ti: int) -> bool:
+"""验证WPO的完整性和各ClaimAnchor有效性。"""
+# 验证WPO签名
+if not Verify(get_subject_pubkey(wpo.entity_fp),
+wpo_signing_payload(wpo),
+wpo.subject_sig):
+return False
+# 验证每个ClaimAnchor
+for claim in wpo.claims:
+if claim.entity_fingerprint != wpo.entity_fp:
+return False
+if not verify_claim_anchor(claim, at_ti):
+return False
+return True
+WPO的隐私语义：
+
+验证方从WPO可以得知：
+✅ 主体确实具有列出的属性（有效ClaimAnchor）
+✅ 背书机构已核实这些属性
+
+验证方从WPO无法得知：
+❌ 主体是否还有其他属性
+❌ 属性内容的具体值（只有AttributeHash）
+❌ 主体在其他场景的活动（见派生指纹）
+
+### 8.3 派生指纹（DerivedFingerprint）
+
+派生指纹用于跨场景关联防护：同一主体在不同场景使用不同的标识符。
+
+DerivedFingerprint = H(
+EntityFingerprint     (32B)   主体真实指纹
+∥ scope_salt            (32B)   场景盐值（由场景方提供）
+∥ issuer_fingerprint    (32B)   背书机构指纹
+)
+
+设计意图：
+攻击者持有场景A的DerivedFP_A和场景B的DerivedFP_B
+无法判断二者是否来自同一主体
+只有主体自己（持有EntityFingerprint）才能推导二者关联
+
+使用规则：
+DerivedFingerprint用于特定场景的隐私保护
+在该场景内部使用DerivedFP代替EntityFP
+场景方知道scope_salt，可以验证DerivedFP的正确性
+场景方不知道EntityFP，无法跨场景关联
+场景方应妥善保管scope_salt，丢失后无法验证DerivedFingerprint的正确性
+
+应用场景：
+医疗系统：患者在A医院和B医院使用不同DerivedFP
+金融系统：用户在不同银行使用不同DerivedFP
+跨平台认证：防止平台通过身份标识追踪用户
+
+限制：
+DerivedFP不能作为ClaimAnchor的EntityFingerprint存储
+（ClaimAnchor MUST使用真实EntityFingerprint）
+DerivedFP仅用于场景内部的引用，不写入L2节点
+
+### 8.4 ZKP接口预留
+
+extension_type = 0x0103（ZKP ClaimAnchor）
+
+当前状态：预留，V1.0不实现
+等待：国家密码局后量子/ZKP标准发布
+
+预留接口定义：
+payload = {
+circuit_id:     bytes\[32\]  // ZKP电路标识（SM3(电路定义)）
+public_inputs:  bytes\[N\]   // 公开输入（验证方可见的结论）
+proof:          bytes\[M\]   // ZKP证明字节序列
+commitment:     bytes\[32\]  // SM3(原始属性内容)，向后兼容
+}
+
+降级处理（hdr_flags.bit0=0(critical)）：
+不支持ZKP的节点 → 使用commitment字段作为普通AttributeHash验证
+返回W012（ZKP降级）
+
+ZKP适用场景（待V2.0实现）：
+连续值范围证明：收入在\[X,Y\]区间，不披露具体值
+集合成员证明：属于白名单，不披露是哪个成员
+多属性组合证明：同时满足A∧B∧C，不单独披露各属性
+
+## 9. 验证规范
+
+### 9.1 ClaimAnchor 完整验证算法
+
+python
+def get_subject_public_key(claim: ClaimAnchor) -> bytes:
+"""
+获取主体公钥。
+
+```
+主体公钥不存储在ClaimAnchor中，需通过以下方式获取：
+  1. 若KYC属性（AttributeType 0x0001）中包含pubkey_hash，
+     则从该KYC ClaimAnchor中获取公钥哈希，再通过外部存储查询公钥。
+  2. 若主体已预先注册公钥，可通过EntityFingerprint从主体注册表查询。
+  3. 若以上均不可行，验证失败（返回E_SUBJECT_PUBKEY_NOT_FOUND）。
+
+建议：KYC_L1_BASIC（0x0001）的AttributeHash中应包含主体公钥的哈希，
+      并由背书机构验证公钥与身份的绑定关系。
+"""
+# 实现略：查询逻辑由L2节点或验证方实现
+pass
+```
+
+def verify_claim_anchor(
+claim:       ClaimAnchor,
+at_ti:       int | None = None,  # 验证时刻，None=使用claim的EEA.TI
+) -> VerifyResult:
+"""
+ClaimAnchor完整验证算法（6步）。
+at_ti决定时序切割基准。
+"""
+result = VerifyResult()
+check_ti = at_ti if at_ti is not None else claim.eea.temporal_index
+
+```
+# ── Step 1: 验证EEA基础层（P2）──────────────────────────
+eea_result = verify_eea_full(claim.eea, verify_depth=2, at_ti=check_ti)
+if not eea_result.valid:
+    return VerifyResult(valid=False, error=E_EEA_INVALID,
+                        detail=eea_result.error)
+
+# ── Step 2: 验证ExtensionHeader──────────────────────────
+if claim.extension_type != 0x0102:
+    return VerifyResult(valid=False, error=E_WRONG_EXT_TYPE)
+if claim.not (hdr_flags & 0x01):
+    return VerifyResult(valid=False, error=E_CRITICAL_FLAG)
+
+# ── Step 3: 验证背书机构信任链──────────────────────────
+issuer_ok, issuer_err = verify_issuer_chain(
+    claim.issuer_fingerprint,
+    claim.attribute_type,
+    check_ti,
+)
+if not issuer_ok:
+    return VerifyResult(valid=False, error=E_ISSUER_INVALID,
+                        detail=issuer_err)
+
+# ── Step 4: 验证有效期（时序切割）──────────────────────
+if claim.valid_until != 0 and claim.valid_until < check_ti:
+    return VerifyResult(valid=False, error=E_CLAIM_EXPIRED,
+                        detail=f"ValidUntil={claim.valid_until}, at_ti={check_ti}")
+
+# ── Step 5: 验证撤销状态（时序切割）────────────────────
+rev_status = verify_revocation_status(claim.anchor_id, check_ti)
+if rev_status.is_revoked:
+    return VerifyResult(valid=False, error=E_CLAIM_REVOKED,
+                        detail=f"撤销时间TI={rev_status.revoked_at}")
+
+# ── Step 6: 验证签名链──────────────────────────────────
+
+# 6a: 重建 subject_signing_payload（189B）
+subject_payload_raw = (
+    b"Iris.Claim.v1"                      # 13B
+    + claim.eea.anchor_id                  # 32B
+    + claim.entity_fingerprint             # 32B
+    + claim.attribute_hash                 # 32B
+    + claim.issuer_fingerprint             # 32B
+    + claim.previous_claim_anchor          # 32B
+    + claim.valid_until.to_bytes(8, 'big') # 8B
+    + claim.attribute_type.to_bytes(2, 'big')  # 2B
+    + bytes(6)                             # reserved_future 6B·MUST=0·8B对齐
+)
+assert len(subject_payload_raw) == 189
+
+# 6b: 验证 SubjectSignature
+subject_pk = get_subject_public_key(claim)
+if subject_pk is None:
+    return VerifyResult(valid=False, error=E_SUBJECT_PUBKEY_NOT_FOUND)
+if not Verify(subject_pk, H(subject_payload_raw), claim.subject_signature):
+    return VerifyResult(valid=False, error=E_SUBJECT_SIG_INVALID)
+
+# 6c: 重建 iris_signing_payload（253B）
+iris_payload_raw = subject_payload_raw + claim.subject_signature  # 189+64
+assert len(iris_payload_raw) == 253
+
+# 6d: 验证 IrisSignature
+issuer_cert = get_issuer_certificate(claim.issuer_fingerprint)
+if not Verify(issuer_cert.public_key, H(iris_payload_raw), claim.iris_signature):
+    return VerifyResult(valid=False, error=E_IRIS_SIG_INVALID)
+
+# ── Step 7: 验证PreviousClaimAnchor（版本链完整性）──────
+if claim.previous_claim_anchor != bytes(32):
+    prev = get_claim_anchor(claim.previous_claim_anchor)
+    if prev is None:
+        result.add_warning(W_PREV_CLAIM_NOT_FOUND,
+                           "前版本ClaimAnchor不在本节点")
+    elif prev.entity_fingerprint != claim.entity_fingerprint:
+        return VerifyResult(valid=False, error=E_CHAIN_FP_MISMATCH,
+                            detail="版本链EntityFingerprint不一致")
+
+result.valid = True
+result.check_ti = check_ti
+result.claim_anchor = claim
+return result
+```
+
+### 9.2 时序切割验证
+
+天玑协议的时序切割是最重要的验证语义之一。
+
+时序切割规则：
+
+验证时刻 at_ti = EEA.TemporalIndex（默认）：
+即"事件发生时，该ClaimAnchor是否有效？"
+这是最常用的验证场景
+
+验证时刻 at_ti = 当前TI：
+即"现在，该ClaimAnchor是否有效？"
+用于实时身份核验
+
+验证时刻 at_ti = 历史TI：
+即"在过去某时刻，该ClaimAnchor是否有效？"
+用于历史审计·司法取证
+
+具体规则：
+
+有效期检查：
+ValidUntil = 0 → 永不过期（任何at_ti均有效）
+ValidUntil > 0 → at_ti ≤ ValidUntil 时有效
+
+撤销检查：
+RevocationRecord.revocation_time = T_revoke
+at_ti < T_revoke → 撤销前，ClaimAnchor有效
+at_ti ≥ T_revoke → 撤销后，ClaimAnchor无效
+
+典型场景：
+合同签署（EEA.TI = T_sign）：
+验证签署时双方的KYC是否有效 → at_ti = T_sign
+即使KYC在T_sign之后撤销，T_sign时的合同仍然有效
+
+实时身份核验：
+当前用户KYC是否有效 → at_ti = current_TI
+已撤销的KYC立即不可用
+
+### 9.3 验证输出格式
+
+json
+{
+"valid": true,
+"check_ti": 1000000001,
+"entity_fingerprint": "hex(32B)",
+"attribute_type": "0x0002",
+"attribute_type_name": "KYC_L2_STANDARD",
+"valid_until": 2000000000,
+"issuer_fingerprint": "hex(32B)",
+"issuer_level": 2,
+"chain_depth": 2,
+"eea_anchor_id": "hex(32B)",
+"claim_anchor_id": "hex(32B)",
+"version_chain_length": 3,
+"revocation_status": "NOT_REVOKED",
+"warnings": [ ],
+"is_degraded_eea": false
+}
+
+## 10. 协议消息（Protobuf）
+
+protobuf
+// gnomon/v1/iris.proto
+syntax = "proto3";
+package gnomon.v1;
+
+// ── 核心数据结构 ──────────────────────────────────────────
+message ClaimAnchor {
+uint32 version                 = 1;
+bytes  anchor_id               = 2;   // 32B
+EEA    eea                     = 3;   // 完整EEA（224B含VP）
+
+// P3 payload字段
+bytes  entity_fingerprint      = 4;   // 32B
+uint32 attribute_type          = 5;   // uint16
+bytes  attribute_hash          = 6;   // 32B
+uint64 valid_until             = 7;   // 0=永不过期
+bytes  issuer_fingerprint      = 8;   // 32B
+bytes  previous_claim_anchor   = 9;   // 32B，全零=首次
+bytes  subject_signature       = 10;  // 64B
+bytes  iris_signature          = 11;  // 64B
+
+// 扩展（ZKP·代理·联合背书）
+ClaimExtension extension       = 12;
+}
+
+message ClaimExtension {
+uint32 extension_type = 1;
+// 0x0103=ZKP  0x0104=DelegatedClaim  0x0105=FederatedClaim
+bytes  payload        = 2;
+}
+
+message IssuerCertificate {
+uint32 version                    = 1;
+bytes  issuer_fingerprint         = 2;   // 32B
+bytes  issuer_public_key          = 3;   // 64B
+uint32 issuer_level               = 4;   // 1·2·3
+repeated uint32 allowed_attr_types = 5;  // uint16列表
+uint64 max_lifetime_ti            = 6;
+bytes  parent_issuer_fp           = 7;   // 32B，全零=根机构
+bytes  parent_cert_sig            = 8;   // 64B
+bytes  root_sig                   = 9;   // 64B
+uint64 valid_from                 = 10;
+uint64 valid_until                = 11;
+bytes  successor_fp               = 12;  // 32B，全零=无
+uint64 overlap_end_ti             = 13;
+}
+
+// ── 天玑服务 ──────────────────────────────────────────────
+service IrisService {
+// 提交ClaimAnchor（背书机构→L2节点）
+rpc SubmitClaimAnchor(SubmitClaimRequest) returns (SubmitClaimResponse);
+
+// 查询主体当前有效ClaimAnchor
+rpc GetCurrentClaim(GetCurrentClaimRequest) returns (GetCurrentClaimResponse);
+
+// 查询主体在某时刻的ClaimAnchor状态（时序切割）
+rpc GetClaimAtTime(GetClaimAtTimeRequest) returns (GetClaimAtTimeResponse);
+
+// 查询主体ClaimAnchor版本链
+rpc GetClaimHistory(GetClaimHistoryRequest) returns (GetClaimHistoryResponse);
+
+// 验证ClaimAnchor（完整6步验证）
+rpc VerifyClaimAnchor(VerifyClaimRequest) returns (VerifyClaimResponse);
+
+// 提交撤销记录
+rpc SubmitRevocation(SubmitRevocationRequest) returns (SubmitRevocationResponse);
+
+// 注册背书机构
+rpc RegisterIssuer(RegisterIssuerRequest) returns (GnomonResponse);
+
+// 查询背书机构信息
+rpc GetIssuerCertificate(GetIssuerRequest) returns (GetIssuerResponse);
+
+// 生成WPO（观察窗口）
+rpc CreateWPO(CreateWPORequest) returns (CreateWPOResponse);
+
+// 查询主体参与的事件（通过SemanticAnchor反查）
+rpc QuerySubjectEvents(QuerySubjectEventsRequest) returns (QuerySubjectEventsResponse);
+}
+
+message SubmitClaimRequest {
+uint32      version      = 1;
+ClaimAnchor claim_anchor = 2;
+}
+
+message SubmitClaimResponse {
+GnomonResponse response      = 1;
+bytes          anchor_id     = 2;   // 32B
+uint64         stored_at_ti  = 3;
+}
+
+message GetCurrentClaimRequest {
+uint32 version            = 1;
+bytes  entity_fingerprint = 2;   // 32B
+uint32 attribute_type     = 3;   // 0=查所有类型
+}
+
+message GetCurrentClaimResponse {
+GnomonResponse       response = 1;
+repeated ClaimAnchor claims   = 2;
+}
+
+message GetClaimAtTimeRequest {
+uint32 version            = 1;
+bytes  entity_fingerprint = 2;   // 32B
+uint32 attribute_type     = 3;
+uint64 at_ti              = 4;   // 查询该TI时刻的状态
+}
+
+message GetClaimAtTimeResponse {
+GnomonResponse response     = 1;
+ClaimAnchor    claim_anchor = 2;
+bool           was_valid    = 3;
+bool           was_revoked  = 4;
+uint64         revoked_at   = 5;
+}
+
+message VerifyClaimRequest {
+uint32 version    = 1;
+bytes  anchor_id  = 2;   // 32B
+uint64 at_ti      = 3;   // 0=使用ClaimAnchor自身的EEA.TI
+}
+
+message VerifyClaimResponse {
+GnomonResponse response              = 1;
+bool           valid                 = 2;
+uint64         check_ti              = 3;
+bytes          entity_fingerprint    = 4;   // 32B
+uint32         attribute_type        = 5;
+string         attribute_type_name   = 6;
+uint64         valid_until           = 7;
+bytes          issuer_fingerprint    = 8;   // 32B
+uint32         issuer_level          = 9;
+uint32         chain_depth           = 10;
+uint32         version_chain_length  = 11;
+repeated uint32 warnings             = 12;
+}
+
+message CreateWPORequest {
+uint32         version            = 1;
+bytes          entity_fingerprint = 2;   // 32B
+repeated uint32 requested_types  = 3;
+bytes          requester_fp      = 4;   // 32B
+string         purpose           = 5;   // 明文目的
+bytes          purpose_hash      = 6;   // 32B H(purpose)
+uint64         at_ti             = 7;
+}
+
+message WPO {
+bytes          entity_fp    = 1;   // 32B
+bytes          requester_fp = 2;   // 32B
+bytes          purpose_hash = 3;   // 32B
+uint64         generated_at = 4;
+repeated ClaimAnchor claims = 5;
+bytes          subject_sig  = 6;   // 64B
+}
+
+message CreateWPOResponse {
+GnomonResponse response = 1;
+WPO            wpo      = 2;
+}
+
+message QuerySubjectEventsRequest {
+uint32      version         = 1;
+bytes       claim_anchor_id = 2;   // 32B 主体的某ClaimAnchor
+PageRequest page            = 3;
+}
+
+message QuerySubjectEventsResponse {
+GnomonResponse       response = 1;
+repeated SubjectEvent events  = 2;
+PageResponse         page     = 3;
+}
+
+message SubjectEvent {
+bytes  eea_anchor_id   = 1;   // 32B
+uint64 temporal_index  = 2;
+bytes  semantic_anchor = 3;   // 32B
+bytes  p4_ref          = 4;   // 32B，可选
+bytes  p5_ref          = 5;   // 32B，可选
+}
+
+## 11. 安全考量
+
+### 11.1 EntityFingerprint 的不可逆性
+
+EntityFingerprint = H(规范化身份材料)
+
+安全性依赖：SM3的单向性（preimage resistance）
+量子安全性：SM3对Grover算法安全（128bit等效），无需迁移
+
+攻击：
+预像攻击：持有EntityFingerprint，尝试还原姓名+身份证号
+防御：SM3预像攻击计算量2^128，不可行
+
+字典攻击：遍历常见姓名+身份证组合（中国人口约14亿）
+防御：即使遍历14亿条，每条计算SM3仍需约14亿次哈希
+GPU加速下约秒级，存在一定风险
+额外防护：AttributeHash = H(content ∥ issuer_salt)
+issuer_salt防止背书机构间的关联推断
+
+### 11.2 背书机构作恶的影响范围
+
+背书机构作恶的最大影响：
+只能影响该机构签发的ClaimAnchor
+不能影响其他机构签发的ClaimAnchor
+不能影响EEA时序（P2层独立）
+
+检测机制：
+监管节点可查询某机构签发的所有ClaimAnchor
+异常签发量（突然批量签发）触发告警
+上级机构可吊销下级机构的IssuerCertificate
+
+应急响应：
+机构作恶被发现 → 上级机构吊销IssuerCertificate
+已签发ClaimAnchor：可批量撤销（使用entity_fingerprint全零的批量RevocationRecord）
+已发生的协作：历史不可追溯撤销（时序切割保护已完成的合法事务）
+
+### 11.3 AI Agent追责链的密码学保证
+
+追责链的密码学路径：
+
+EEA.SemanticAnchor（P3+P5组合）
+→ P3_ref = Agent.ClaimAnchor.AnchorID
+→ Agent.ClaimAnchor.EntityFingerprint
+= H(0x20 ∥ agent_pubkey ∥ deployer_fp)
+→ deployer_fp 是 deployer.EntityFingerprint
+→ deployer.ClaimAnchor → 自然人/法人
+
+每一步都有密码学保证：
+① EEA时序不可伪造（ChainProof）
+② SemanticAnchor绑定至EEA（AnchorID嵌入）
+③ Agent指纹包含部署方（不可分离）
+④ 部署方ClaimAnchor由背书机构核实
+
+结论：
+攻击者无法切断追责链的任何一段
+即使攻击者控制了Agent，也无法更改Agent指纹中的deployer_fp
+
+## 12. 测试向量
+
+### 12.1 EntityFingerprint 测试向量
+
+python
+import hashlib, unicodedata
+
+def sm3(data: bytes) -> bytes:
+return hashlib.sha3_256(data).digest()  # 演示用，生产使用国密SM3
+
+# 测试向量1：自然人（居民身份证）
+
+name    = "张三"
+id_num  = "110101199001011234"
+
+name_normalized = unicodedata.normalize('NFC', name).strip().encode('utf-8')
+type_prefix     = bytes(\[0x01\])
+id_upper        = id_num.upper().encode('ascii')
+
+efp_human = sm3(name_normalized + type_prefix + id_upper)
+print(f"EntityFingerprint(自然人): {efp_human.hex()}")
+
+# 实现方MUST与此输出一致
+
+# 测试向量2：法人（USCC）
+
+uscc = "91110000717919617H"
+uscc_normalized = uscc.upper().encode('ascii')
+efp_corp = sm3(bytes(\[0x03\]) + uscc_normalized)
+print(f"EntityFingerprint(法人): {efp_corp.hex()}")
+
+# 测试向量3：AI Agent（公钥非压缩格式64B）
+
+agent_pubkey    = bytes.fromhex("cc" \* 64)   # 64B SM2公钥（x∥y）
+deployer_fp     = efp_human                   # 使用上面的自然人指纹
+efp_agent = sm3(bytes(\[0x20\]) + agent_pubkey + deployer_fp)
+print(f"EntityFingerprint(AI Agent): {efp_agent.hex()}")
+
+# 验证：efp_agent包含deployer_fp，追责路径密码学绑定
+
+### 12.2 SubjectSignature 原文长度验证
+
+python
+
+# 189B 签名原文验证
+
+EEA_ANCHOR_ID   = bytes.fromhex("11" \* 32)
+ENTITY_FP       = efp_human
+ATTR_TYPE       = 0x0002   # KYC_L2_STANDARD
+ATTR_HASH       = bytes.fromhex("22" \* 32)
+VALID_UNTIL     = 2000000000
+ISSUER_FP       = bytes.fromhex("33" \* 32)
+PREV_CLAIM      = bytes(32)  # 首次，全零
+
+raw = (
+b"Iris.Claim.v1"           # 13B
++ EEA_ANCHOR_ID            # 32B
++ ENTITY_FP                # 32B
++ ATTR_HASH                # 32B
++ ISSUER_FP                # 32B
++ PREV_CLAIM               # 32B
++ VALID_UNTIL.to_bytes(8,'big')  # 8B
++ ATTR_TYPE.to_bytes(2,'big')  # 2B
++ bytes(6)                 # reserved_future 6B·MUST=0
+)
+assert len(raw) == 189, f"签名原文长度错误：{len(raw)}"
+subject_signing_hash = sm3(raw)
+print(f"SubjectSignature signing hash: {subject_signing_hash.hex()}")
+
+# IrisSignature原文（253B）
+
+SUBJECT_SIG = bytes.fromhex("44" \* 64)  # 假设的SubjectSignature
+iris_raw = raw + SUBJECT_SIG  # 189 + 64 = 253B
+assert len(iris_raw) == 253
+iris_signing_hash = sm3(iris_raw)
+print(f"IrisSignature signing hash: {iris_signing_hash.hex()}")
+
+### 12.3 信任链验证测试用例
+
+python
+
+# 验证L2机构不能签发L1专属的AttributeType
+
+def test_attr_permission():
+l2_cert = IssuerCertificate(
+issuer_level = 2,
+allowed_attribute_types = \[0x0001, 0x0002, 0x0003\],  # KYC类
+)
+# 尝试签发0x0201（组织内职务），L2机构未获授权
+ok, err = verify_issuer_chain(l2_cert.issuer_fp, 0x0201, current_ti())
+assert not ok
+assert "E_ATTR_NOT_ALLOWED" in err
+print("✅ AttributeType权限约束测试通过")
+
+# 验证级联撤销
+
+def test_cascade_revoke():
+deployer_fp   = efp_human
+agent_efp     = efp_agent
+# 撤销部署方
+rrs = cascade_revoke_agent(deployer_fp, current_ti(), 0x04)
+# 验证Agent ClaimAnchor被撤销
+status = verify_revocation_status(agent_claim_anchor_id, current_ti())
+assert status.is_revoked
+print("✅ AI Agent级联撤销测试通过")
+
+## 13. 错误码与警告码
+
+P3天玑协议错误码：
+
+E_EEA_INVALID         EEA基础验证失败（依赖P2）
+E_WRONG_EXT_TYPE      ExtensionHeader.extension_type不是0x0102
+E_CRITICAL_FLAG       hdr_flags.bit0(critical)不为1
+E_ISSUER_NOT_FOUND    背书机构未注册
+E_ISSUER_EXPIRED      背书机构证书在check_ti已过期
+E_ISSUER_REVOKED      背书机构已被撤销
+E_ISSUER_CYCLE        信任链存在循环引用
+E_ATTR_NOT_ALLOWED    机构无权签发此AttributeType
+E_ATTR_OVERFLOW       子机构权限超出父机构范围
+E_CLAIM_EXPIRED       ClaimAnchor在check_ti已过期
+E_CLAIM_REVOKED       ClaimAnchor在check_ti已撤销
+E_SUBJECT_SIG_INVALID SubjectSignature验证失败
+E_IRIS_SIG_INVALID    IrisSignature验证失败
+E_CHAIN_FP_MISMATCH   版本链EntityFingerprint不一致
+E_NORMALIZATION_FAILED EntityFingerprint规范化失败
+E_DUPLICATE_CLAIM     同一EntityFP+AttributeType已存在有效ClaimAnchor
+E_SUBJECT_PUBKEY_NOT_FOUND 无法获取主体公钥验证SubjectSignature
+
+警告码：
+W_CLAIM_EXPIRING      ClaimAnchor即将过期（< 30天）
+W_PREV_CLAIM_NOT_FOUND 前版本ClaimAnchor不在本节点（跨节点同步延迟）
+W_GRACE_PERIOD        ClaimAnchor处于宽限期（已过ValidUntil但在宽限期内）
+W012  ZKP_DEGRADED    ZKP不被支持，降级为commitment验证
+W_DERIVED_FP_USED     WPO中使用了DerivedFingerprint（隐私场景）
+
+## 14. 版本历史
+
+版本	日期	说明
+V3.7	2026-06-18	甲-full字段重排：删除甲-lite插入的Reserved(2B)，字段重排为bytes\[32\]前置→uint64→uint16→签名布局。payload 268B→266B，Anchor 500B→498B。签名原文185B→183B/249B→247B，字段顺序=布局物理顺序。
+V3.6	2026-06-18	ExtHeader 6B→8B（+Reserved 2B），ClaimAnchor总长 498B→500B。签名原文长度不变。
+V1.2	2026-06-04	同步P2 EventAnchor 192B/EEA 224B定稿口径，ClaimAnchor总长调整为498B（224B EEA + 6B ExtensionHeader + 268B payload），更新Protobuf注释和尺寸说明。
+V1.1	2026-06-03	补充主体公钥获取方式（新增E_SUBJECT_PUBKEY_NOT_FOUND）；明确AI Agent公钥格式（64B非压缩）；明确Potential状态的逻辑性质；补充信任链验证签名原文构造公式；明确主体撤销代理机制；定义级联撤销最大深度（MAX_CASCADE_DEPTH=5）；完善WPO的purpose验证；补充派生指纹salt管理建议；其他小优化
+V1.0	2026-06	正式版·设计冻结。完整定义：A/B类主体·EntityFingerprint计算（5类主体·规范化规则）·旧版ClaimAnchor结构·双重签名（185B+249B）·AttributeType完整编码体系（KYC/KYB/资质/组织/AI/隐私增强·自定义）·背书信任链（L1/L2/L3·allowed_attribute_types约束·验证算法伪代码）·状态机·版本链·撤销（时序切割）·AI Agent级联撤销·WPO·派生指纹·ZKP预留·完整验证算法伪代码·Protobuf消息·测试向量·错误码。
+V4.2	2026-08-02	基线V4.1→V4.2：头尾版本号·日期·全局标注对齐至v4.2·2026-08-02。V4.1修订块重整：移除RFC正文中"来源"属注·保留规范约束文本·签发前置条件重复块清除。
+V4.1	2026-07-20	安全修订：EntityPrefix白名单（0x01/02/03/05/20——拒绝未知prefix）；ClaimAnchor签发前置条件（同状态唯一性约束·前置状态检查·Issuer ACL授权验证）。历史锚点不受影响。
+V4.0	2026-06-20	V7b五层8B对齐：reserved_future +6B·Anchor +6B·12级签名 +6B
+
+---
+
+## 发布复核事项（非规范性）
+
+V4.4 源规范中有影响互操作性的冲突；在将本中文发布版标记为规范性版本前，必须解决：
+
+1. **EntityPrefix 冲突：** 安全白名单规定 `0x02` 为法人、`0x03` 为设备、`0x05` 为组织；详细算法则将 `0x02` 用于非大陆自然人、`0x03` 用于法人、`0x30` 用于设备。旧类型表还列出白名单中没有的 `0x04`、`0x30` 和 `0xFF`。
+
+2. **AttributeType 编码冲突：** `0x0020` 和 `0x0021` 被分配给不同的 KYC/KYB 声明；隐私增强区间被描述为与一般 KYC 区间重叠，且 `0x0090`/`0x0091` 超出所述 `0x0050–0x008F` 范围。
+
+3. **VP 缺省时的 ClaimAnchor 长度：** 504B 长度按包含 VP 的 224B EEA 计算。P2 将 VP 定义为可选，但源文未明确 P3 签发是否必须包含 VP，也未定义无 VP 时是否采用更短布局。
+
+4. **示例哈希实现：** 源示例以 SHA3-256 代替 SM3，仅用于演示，不是协议实现，严禁作为一致性测试向量。
+
+本草案不在上述冲突中自行选择编码或更改协议常量。应先在权威基线中解决，再同步本中文发布版。
+
+---
+
+*RFC-P3-001 —* **日冕系统**（天玑）协议 v4.4 *· GnomonSystem 协议基线 v4.4 · 中文 · 2026-10-21*
