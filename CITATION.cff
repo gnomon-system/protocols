@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use these documents, cite the specific title and version used."
+title: "GnomonSystem Protocol Specifications"
+type: other
+authors:
+  - name: "Hangzhou Tianshu Temporal Technology Co., Ltd."
+version: "4.4"
+date-released: "2026-10-24"
+license: CC-BY-4.0
+url: "https://github.com/gnomon-system/protocols"
